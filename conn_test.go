@@ -1807,6 +1807,10 @@ type TestServer struct {
 	// hang until the server is stopped, simulating a stalled backend.
 	stallSystemQueries int32
 
+	// systemLocalHostID, when set, makes system.local queries return one row
+	// describing 127.0.0.1 with this host_id.
+	systemLocalHostID atomic.Pointer[UUID]
+
 	protocol   byte
 	headerSize int
 	ctx        context.Context
@@ -1820,6 +1824,28 @@ type TestServer struct {
 }
 
 type testSupportedFactory func(conn net.Conn) map[string][]string
+
+func writeSystemLocalRow(f *framer, stream int, hostID UUID) {
+	f.writeHeader(0, frm.OpResult, stream)
+	f.writeInt(frm.ResultKindRows)
+	f.writeInt(int32(frm.FlagGlobalTableSpec))
+	f.writeInt(4)
+	f.writeString("system")
+	f.writeString("local")
+	f.writeString("host_id")
+	f.writeShort(uint16(TypeUUID))
+	f.writeString("rpc_address")
+	f.writeShort(uint16(TypeInet))
+	f.writeString("data_center")
+	f.writeShort(uint16(TypeVarchar))
+	f.writeString("rack")
+	f.writeShort(uint16(TypeVarchar))
+	f.writeInt(1)
+	f.writeBytes(hostID[:])
+	f.writeBytes(net.IPv4(127, 0, 0, 1).To4())
+	f.writeBytes([]byte("datacenter1"))
+	f.writeBytes([]byte("rack1"))
+}
 
 func (srv *TestServer) port() int {
 	return srv.listen.Addr().(*net.TCPAddr).Port
@@ -1965,6 +1991,10 @@ func (srv *TestServer) process(conn net.Conn, reqFrame *framer, exts map[string]
 			(strings.Contains(query, "system.peers") || strings.Contains(query, "system.local")) {
 			<-srv.ctx.Done()
 			return
+		}
+		if id := srv.systemLocalHostID.Load(); id != nil && strings.Contains(query, "system.local") {
+			writeSystemLocalRow(respFrame, head.Stream, *id)
+			break
 		}
 		switch strings.ToLower(first) {
 		case "kill":

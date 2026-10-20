@@ -28,8 +28,10 @@
 package gocql
 
 import (
+	"context"
 	"net"
 	"testing"
+	"time"
 
 	frm "github.com/gocql/gocql/internal/frame"
 )
@@ -94,6 +96,66 @@ func TestParseProtocol(t *testing.T) {
 	for i, test := range tests {
 		if proto := parseProtocolFromError(test.err); proto != test.proto {
 			t.Errorf("%d: exepcted proto %d got %d", i, test.proto, proto)
+		}
+	}
+}
+
+// TestControlConnReconnectKeepsKnownHostRoutable covers a node whose pool was
+// dropped (handleNodeDown) and that then becomes the control host: setupConn
+// must fill its pool around the session's existing HostInfo, the one the
+// policy holds, so that object goes UP again and the node stays routable.
+func TestControlConnReconnectKeepsKnownHostRoutable(t *testing.T) {
+	srv := NewTestServer(t, defaultProto, context.Background())
+	defer srv.Stop()
+
+	cluster := testCluster(defaultProto, "127.0.0.1")
+	cluster.Port = srv.port()
+	cluster.PoolConfig.HostSelectionPolicy = TokenAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Events.DisableTopologyEvents = true
+	cluster.Events.DisableNodeStatusEvents = true
+	cluster.Events.DisableSchemaEvents = true
+	s, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A known node as handleNodeDown leaves it: in hostSource and the policy,
+	// DOWN, and without a pool.
+	known := &HostInfo{
+		connectAddress: net.IPv4(127, 0, 0, 1),
+		port:           srv.port(),
+		hostId:         MustRandomUUID(),
+		dataCenter:     "datacenter1",
+		rack:           "rack1",
+	}
+	known.setState(NodeDown)
+	s.hostSource.addOrUpdate(known)
+	s.policy.AddHost(known)
+	srv.systemLocalHostID.Store(&known.hostId)
+
+	c := createControlConn(s)
+	conn, err := s.dial(s.ctx, known, s.controlConnConfig(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := c.setupConn(conn); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if pool, ok := s.pool.getPool(known); ok && pool.host.IsUp() {
+			if pool.host != known {
+				t.Fatalf("pool filled with a new HostInfo %p, not the session's %p, which stays %v", pool.host, known, known.State())
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no UP pool for the known host: state %v", known.State())
+		case <-time.After(time.Millisecond):
 		}
 	}
 }

@@ -370,7 +370,7 @@ func (c *controlConn) setupConn(conn *Conn) error {
 		// with the fill called by Session.init. Session.init needs to wait for its fill to finish and that
 		// would return immediately if we started the fill here.
 		// TODO(martin-sucha): Trigger pool refill for all hosts, like in reconnectDownedHosts?
-		go c.session.startPoolFill(host)
+		go c.session.startPoolFill(c.session.hostSource.addOrUpdate(host))
 	}
 	return nil
 }
